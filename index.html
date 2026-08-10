@@ -125,7 +125,7 @@ function makeDefaultView(){
     tab:"mine", studentId:null, mode:"login", authErr:"", regRole:"teacher", regDept:DEPTS[0],
     verdictPick:null, reviewComment:"", adminVerdict:null, adminComment:"", resubmitDeadline:"",
     editingStudent:false, recoverStep:1, recoverEmail:"", recoverErr:"", recoverOk:"",
-    filterDept:"", filterCls:""
+    filterDept:"", filterCls:"", reassigning:false, scrollY:0
   };
 }
 
@@ -175,6 +175,26 @@ function statusOf(id){
 document.addEventListener('DOMContentLoaded', ()=>{ const r=document.getElementById('root'); if(r&&loading) r.innerHTML=`<div class='loading'><div class='spinner'></div><div>불러오는 중...</div></div>`; });
 
 // ─── 필터 헬퍼 ──────────────────────────────────────────
+// 학과별 그룹 드롭다운 옵션 생성
+function makeReviewerOpts(excludeUid){
+  const groups = {};
+  const DEPT_ORDER = ["예술경영","방송영상","공연연출","공통"];
+  Object.entries(DATA.users).forEach(([u,p])=>{
+    if(u === excludeUid) return; // 본인 담당 학생이면 제외 (선택사항)
+    const dept = p.dept || "기타";
+    if(!groups[dept]) groups[dept] = [];
+    groups[dept].push([u,p]);
+  });
+  // Sort each group by displayName
+  Object.values(groups).forEach(g => g.sort((a,b)=>a[1].displayName.localeCompare(b[1].displayName,"ko")));
+  const orderedDepts = [...DEPT_ORDER.filter(d=>groups[d]), ...Object.keys(groups).filter(d=>!DEPT_ORDER.includes(d))];
+  return orderedDepts.map(dept => {
+    const members = groups[dept] || [];
+    const opts = members.map(([u,p])=>`<option value="${u}">${esc(p.displayName)}${p.role==="admin"?" (관리자)":""}${p.interest?" · "+esc(p.interest.slice(0,15)):""}</option>`).join("");
+    return `<optgroup label="${esc(dept)}">${opts}</optgroup>`;
+  }).join("");
+}
+
 window.__filterSet = function(type, val){
   if(type==="dept"){ view.filterDept=val; view.filterCls=""; }
   else              { view.filterCls=val; }
@@ -1053,21 +1073,31 @@ function renderDetail(studentId){
   // 관리자: 리뷰어 배정 or 최종 결정
   if(admin){
     const needsAssign = latest && (!r || r.versionIndex!==vIdx);
-    if(needsAssign){
-      const opts=Object.entries(DATA.users)
-        .map(([u,p])=>`<option value="${u}">${esc(p.dept||"-")} · ${esc(p.displayName)}${p.role==="admin"?" (관리자)":""}${p.interest?" — "+esc(p.interest.slice(0,20)):""}</option>`)
-        .join("");
+    if(needsAssign || (r && !r.adminDecision && view.reassigning)){
+      const opts = makeReviewerOpts(null);
+      const roundNo = needsAssign ? sub.rounds.length+1 : sub.rounds.length;
+      const prevR1 = !needsAssign && r ? r.reviewers[0]?.user : "";
+      const prevR2 = !needsAssign && r ? r.reviewers[1]?.user : "";
       html+=`<div class="card">
-        <div class="sectiontitle" style="margin-top:0">리뷰어 지정 (${sub.rounds.length+1}차)</div>
+        <div class="sectiontitle" style="margin-top:0">${view.reassigning?"리뷰어 변경":"리뷰어 지정"} (${roundNo}차)</div>
+        ${view.reassigning?`<div style="font-size:12px;color:var(--amber);margin-bottom:8px">⚠️ 변경 시 이미 제출된 리뷰는 초기화됩니다.</div>`:""}
         <label>리뷰어 1</label><select id="a-r1">${opts}</select>
         <label>리뷰어 2</label><select id="a-r2">${opts}</select>
         <label>마감일</label><input id="a-dl" type="date" value="${todayPlus(7)}" />
-        <div style="margin-top:12px"><button class="btn" id="assign-btn">리뷰 배정하기</button></div>
+        <div style="margin-top:12px;display:flex;gap:8px">
+          <button class="btn" id="assign-btn">${view.reassigning?"변경 적용":"리뷰 배정하기"}</button>
+          ${view.reassigning?`<button class="btn ghost" id="cancel-reassign">취소</button>`:""}
+        </div>
       </div>`;
     } else if(r && !r.adminDecision){
       const done=r.reviewers.filter(rv=>rv.feedback).length;
       if(done<2){
-        html+=`<div class="card"><div class="meta">${done}/2명 리뷰 완료. 2명 모두 완료 후 최종 결정을 작성할 수 있습니다.</div></div>`;
+        const rv1=r.reviewers[0], rv2=r.reviewers[1];
+        html+=`<div class="card">
+          <div class="meta" style="margin-bottom:8px">${done}/2명 리뷰 완료. 2명 모두 완료 후 최종 결정을 작성할 수 있습니다.</div>
+          <div class="meta">리뷰어 1: ${userLabel(rv1?.user)} ${rv1?.feedback?"✅":"⏳"} · 리뷰어 2: ${userLabel(rv2?.user)} ${rv2?.feedback?"✅":"⏳"}</div>
+          <div style="margin-top:8px"><button class="btn ghost sm" id="start-reassign">리뷰어 변경</button></div>
+        </div>`;
       } else {
         html+=`<div class="card">
           <div class="sectiontitle" style="margin-top:0">최종 결정 작성</div>
@@ -1107,8 +1137,8 @@ function renderDetail(studentId){
 function attachAppEvents(){
   q("logout-btn", e=> e.onclick=()=> auth.signOut());
   document.querySelectorAll(".tab").forEach(t=>{ t.onclick=()=>{ view.tab=t.dataset.tab; view.studentId=null; view.filterDept=''; view.filterCls=''; render(); }; });
-  document.querySelectorAll("[data-open]").forEach(c=>{ c.onclick=()=>{ view.studentId=c.dataset.open; view.verdictPick=null; view.reviewComment=""; view.adminVerdict=null; view.adminComment=""; view.editingStudent=false; render(); }; });
-  q("back-btn", e=> e.onclick=()=>{ view.studentId=null; render(); });
+  document.querySelectorAll("[data-open]").forEach(c=>{ c.onclick=()=>{ view.scrollY=window.scrollY; view.studentId=c.dataset.open; view.verdictPick=null; view.reviewComment=""; view.adminVerdict=null; view.adminComment=""; view.editingStudent=false; view.reassigning=false; render(); }; });
+  q("back-btn", e=> e.onclick=()=>{ view.studentId=null; render(); setTimeout(()=>window.scrollTo({top:view.scrollY||0,behavior:'instant'}),30); });
 
   // 관심분야 저장 (시각적 피드백)
   q("save-interest", btn=> btn.onclick=async()=>{
@@ -1204,18 +1234,36 @@ function attachAppEvents(){
     view.studentId=null; view.tab="status"; render();
   });
 
-  // 리뷰어 배정
+  // 리뷰어 배정 / 변경
   q("assign-btn", btn=> btn.onclick=async()=>{
     const r1=val("a-r1"), r2=val("a-r2"), dl=val("a-dl");
-    btn.disabled=true;
-    const sub=subOf(view.studentId);
-    sub.rounds.push({
-      versionIndex:sub.versions.length-1,
-      reviewers:[{slot:1,user:r1,deadline:dl,feedback:null},{slot:2,user:r2,deadline:dl,feedback:null}],
-      adminDecision:null
-    });
-    await saveSubmission(view.studentId); render();
+    btn.disabled=true; btn.textContent="저장 중...";
+    const sid=view.studentId;
+    const sub=subOf(sid);
+    if(view.reassigning){
+      // 변경: 현재 라운드 리뷰어 교체 (기존 피드백 초기화)
+      const r=lastRound(sub);
+      if(r){
+        r.reviewers=[{slot:1,user:r1,deadline:dl,feedback:null},{slot:2,user:r2,deadline:dl,feedback:null}];
+      }
+    } else {
+      // 신규 배정
+      sub.rounds.push({
+        versionIndex:sub.versions.length-1,
+        reviewers:[{slot:1,user:r1,deadline:dl,feedback:null},{slot:2,user:r2,deadline:dl,feedback:null}],
+        adminDecision:null
+      });
+    }
+    try{
+      await saveSubmission(sid);
+      view.reassigning=false; render();
+    } catch(e){
+      alert("저장 실패: "+e.message);
+      btn.disabled=false;
+    }
   });
+  q("start-reassign", e=> e.onclick=()=>{ view.reassigning=true; render(); });
+  q("cancel-reassign", e=> e.onclick=()=>{ view.reassigning=false; render(); });
 
   // 판정 버튼 (의견 보존)
   document.querySelectorAll(".vbtn[data-v]").forEach(b=> b.onclick=()=>{
@@ -1236,30 +1284,62 @@ function attachAppEvents(){
   const admTa=document.getElementById("admin-cmt");
   if(admTa) admTa.oninput=e=>{ view.adminComment=e.target.value; };
 
-  // 리뷰 제출
+  // 리뷰 제출 (Firestore 트랜잭션으로 동시 제출 충돌 방지)
   q("submit-rev", btn=> btn.onclick=async()=>{
     const cmt=(document.getElementById("rev-cmt")?.value||view.reviewComment).trim();
     if(!view.verdictPick||!cmt){ alert("판정과 의견을 모두 입력해주세요."); return; }
-    btn.disabled=true;
-    const sub=subOf(view.studentId);
-    const r=lastRound(sub);
-    const slot=r.reviewers.find(rv=>rv.user===session.uid);
-    slot.feedback={ verdict:view.verdictPick, comment:cmt, ts:Date.now() };
-    await saveSubmission(view.studentId);
-    view.verdictPick=null; view.reviewComment=""; render();
+    btn.disabled=true; btn.textContent="제출 중...";
+    const sid=view.studentId;
+    const feedbackData={ verdict:view.verdictPick, comment:cmt, ts:Date.now() };
+    try{
+      const docRef = db.collection("submissions").doc(sid);
+      await db.runTransaction(async(tx)=>{
+        const snap = await tx.get(docRef);
+        const data = snap.exists ? snap.data() : {versions:[], rounds:[]};
+        const rounds = data.rounds||[];
+        const lastR = rounds[rounds.length-1];
+        if(!lastR) throw new Error("리뷰 라운드가 없습니다");
+        const slotIdx = lastR.reviewers.findIndex(rv=>rv.user===session.uid);
+        if(slotIdx===-1) throw new Error("배정된 슬롯이 없습니다");
+        lastR.reviewers[slotIdx].feedback = feedbackData;
+        tx.set(docRef, data);
+        // Sync local cache
+        DATA.submissions[sid] = data;
+      });
+      console.log("[JRS] 리뷰 트랜잭션 완료");
+      view.verdictPick=null; view.reviewComment=""; render();
+    } catch(e){
+      console.error("[JRS] 리뷰 저장 실패:", e);
+      alert("저장 실패: " + (e.message||e.code) + " — 잠시 후 다시 시도해주세요.");
+      btn.disabled=false; btn.textContent="리뷰 제출 (원장/부원장에게 전달)";
+    }
   });
 
-  // 최종 결정
+  // 최종 결정 (트랜잭션)
   q("admin-decide-btn", btn=> btn.onclick=async()=>{
     const cmt=(document.getElementById("admin-cmt")?.value||view.adminComment).trim();
     const dl=document.getElementById("resub-dl")?.value||view.resubmitDeadline;
     if(!view.adminVerdict||!cmt){ alert("판정과 의견을 모두 입력해주세요."); return; }
-    btn.disabled=true;
-    const sub=subOf(view.studentId);
-    const r=lastRound(sub);
-    r.adminDecision={ verdict:view.adminVerdict, comment:cmt, resubmitDeadline:dl, by:session.uid, ts:Date.now() };
-    await saveSubmission(view.studentId);
-    view.adminVerdict=null; view.adminComment=""; render();
+    btn.disabled=true; btn.textContent="저장 중...";
+    const sid=view.studentId;
+    const decision={ verdict:view.adminVerdict, comment:cmt, resubmitDeadline:dl, by:session.uid, ts:Date.now() };
+    try{
+      const docRef = db.collection("submissions").doc(sid);
+      await db.runTransaction(async(tx)=>{
+        const snap = await tx.get(docRef);
+        const data = snap.exists ? snap.data() : {versions:[], rounds:[]};
+        const rounds = data.rounds||[];
+        if(!rounds.length) throw new Error("리뷰 라운드가 없습니다");
+        rounds[rounds.length-1].adminDecision = decision;
+        tx.set(docRef, data);
+        DATA.submissions[sid] = data;
+      });
+      view.adminVerdict=null; view.adminComment=""; render();
+    } catch(e){
+      console.error("[JRS] 최종결정 저장 실패:", e);
+      alert("저장 실패: " + (e.message||e.code));
+      btn.disabled=false; btn.textContent="최종 결정 전달";
+    }
   });
 }
 
